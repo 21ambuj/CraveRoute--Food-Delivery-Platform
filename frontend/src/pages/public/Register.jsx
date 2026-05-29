@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
-import axios from 'axios';
+import api from '../../utils/api';
 import Navbar from '../../components/Navbar';
 import toast from 'react-hot-toast';
 
@@ -37,10 +37,19 @@ const Register = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+
+        // --- Client-side validation ---
+        if (formData.name.trim().length < 2) {
+            return toast.error('Name must be at least 2 characters long.');
+        }
+        if (formData.password.length < 6) {
+            return toast.error('Password must be at least 6 characters long.');
+        }
+
         setLoading(true);
 
         try {
-            await axios.post('http://localhost:5000/api/auth/register', formData);
+            await api.post('/auth/register', formData);
             toast.success('Account created successfully! Redirecting to login...');
             
             // Wait 2 seconds so they can read the success message
@@ -117,8 +126,9 @@ const Register = () => {
                                     type="password" 
                                     name="password"
                                     required 
+                                    minLength={6}
                                     className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-rose-500 focus:border-transparent outline-none transition-all shadow-sm"
-                                    placeholder="••••••••"
+                                    placeholder="Min 6 characters"
                                     value={formData.password}
                                     onChange={handleChange}
                                 />

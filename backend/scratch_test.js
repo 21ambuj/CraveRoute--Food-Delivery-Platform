@@ -1,14 +1,18 @@
+require('dotenv').config();
 const db = require('./config/db');
 
-async function getUsers() {
+async function test() {
     try {
-        const [users] = await db.query("SELECT id, name, email, role FROM users");
-        console.log(users);
-        process.exit(0);
-    } catch(e) {
+        try {
+            await db.query('ALTER TABLE orders ADD COLUMN delivery_otp VARCHAR(6) NULL');
+            console.log("Migration successful: Added delivery_otp");
+        } catch (err) {
+            console.log("Error or already exists:", err.message);
+        }
+    } catch (e) {
         console.error(e);
-        process.exit(1);
+    } finally {
+        process.exit();
     }
 }
-
-getUsers();
+test();

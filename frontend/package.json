@@ -13,6 +13,7 @@
     "@tailwindcss/vite": "^4.2.4",
     "@tanstack/react-query": "^5.99.2",
     "axios": "^1.15.2",
+    "puppeteer": "^24.43.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-hot-toast": "^2.6.0",

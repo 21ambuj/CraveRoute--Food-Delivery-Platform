@@ -4,14 +4,53 @@ import { useQuery, useMutation } from '@tanstack/react-query';
 import api from '../../utils/api';
 import Navbar from '../../components/Navbar';
 import toast from 'react-hot-toast';
+import { calculateDistance } from '../../utils/location';
 
 const RestaurantMenu = () => {
     const { id } = useParams();
     const navigate = useNavigate();
     
-    // Local State for Shopping Cart
-    const [cart, setCart] = useState([]);
+    // Local State for Shopping Cart (Hydrated from localStorage)
+    const [cart, setCart] = useState(() => {
+        const saved = localStorage.getItem('craveroute_cart');
+        return saved ? JSON.parse(saved) : [];
+    });
+    const [cartRestaurantId, setCartRestaurantId] = useState(() => {
+        return localStorage.getItem('craveroute_cart_restaurant_id') || null;
+    });
+
     const [paymentSuccess, setPaymentSuccess] = useState({ show: false, txId: '', estDelivery: '' });
+    const [userLoc, setUserLoc] = useState({ lat: null, lng: null });
+    const [useWallet, setUseWallet] = useState(false);
+
+    // Fetch User Profile for Wallet Balance
+    const { data: custProfile } = useQuery({
+        queryKey: ['customerProfile'],
+        queryFn: async () => {
+            const { data } = await api.get('/auth/profile');
+            return data;
+        }
+    });
+
+    // Fetch User Location for Distance Calc
+    React.useEffect(() => {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => setUserLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude })
+            );
+        }
+    }, []);
+
+    // Persist Cart to localStorage
+    React.useEffect(() => {
+        localStorage.setItem('craveroute_cart', JSON.stringify(cart));
+        if (cart.length === 0) {
+            localStorage.removeItem('craveroute_cart_restaurant_id');
+            setCartRestaurantId(null);
+        } else if (cartRestaurantId) {
+            localStorage.setItem('craveroute_cart_restaurant_id', cartRestaurantId);
+        }
+    }, [cart, cartRestaurantId]);
 
     // 1. Fetch Restaurant Details
     const { data: restaurant, isLoading: resLoading } = useQuery({
@@ -48,6 +87,16 @@ const RestaurantMenu = () => {
 
     // Cart Handlers
     const addToCart = (product) => {
+        // Zomato strict isolation: Cannot add from multiple restaurants
+        if (cart.length > 0 && cartRestaurantId && cartRestaurantId !== id) {
+            toast.error("Your cart contains items from another restaurant. Please clear your cart first.", { duration: 4000 });
+            return;
+        }
+
+        if (cart.length === 0) {
+            setCartRestaurantId(id);
+        }
+
         const existing = cart.find(item => item.product_id === product.id);
         if (existing) {
             setCart(cart.map(item => item.product_id === product.id ? { ...item, quantity: item.quantity + 1 } : item));
@@ -60,18 +109,60 @@ const RestaurantMenu = () => {
         setCart(cart.filter(item => item.product_id !== productId));
     };
 
+    const clearCart = () => {
+        setCart([]);
+        toast.success("Cart cleared!");
+    };
+
     const cartTotal = cart.reduce((total, item) => total + (item.price * item.quantity), 0);
+
+    // Calculate Dynamic Delivery Fee
+    let deliveryFee = 25; // Default Base Fee
+    let distanceStr = '';
+    
+    if (userLoc.lat && restaurant?.latitude) {
+        // We need to import calculateDistance at the top
+        const dist = calculateDistance(userLoc.lat, userLoc.lng, restaurant.latitude, restaurant.longitude);
+        distanceStr = `(${dist.toFixed(1)} km away)`;
+        if (dist > 3) {
+            deliveryFee = 25 + Math.ceil(dist - 3) * 10;
+        }
+    }
+
+    const platformFee = 3;
+    const tax = cartTotal * 0.05; // 5% GST
+    const overallTotal = cartTotal + deliveryFee + platformFee + tax;
 
     const handleCheckout = async () => {
         if (cart.length === 0) return;
-        
-        const overallTotal = cartTotal + 28;
 
         try {
+            const walletBalance = Number(custProfile?.wallet || 0);
+            
+            if (useWallet && walletBalance >= overallTotal) {
+                // Fully covered by wallet
+                placeOrderMut.mutate({
+                    restaurant_id: id,
+                    items: cart.map(c => ({ product_id: c.product_id, quantity: c.quantity, price: c.price })),
+                    total_amount: overallTotal,
+                    payment_method: 'wallet'
+                });
+                return;
+            }
+
+            // Need Razorpay (either full or partial)
+            let razorpayAmount = overallTotal;
+            let finalPaymentMethod = 'razorpay';
+
+            if (useWallet && walletBalance > 0 && walletBalance < overallTotal) {
+                razorpayAmount = overallTotal - walletBalance;
+                finalPaymentMethod = 'wallet_online';
+            }
+
             const rzpKey = import.meta.env.VITE_RAZORPAY_KEY_ID;
 
             // 1. Create Razorpay Order in Backend
-            const { data: orderData } = await api.post('/payments/create-order', { amount: overallTotal });
+            const { data: orderData } = await api.post('/payments/create-order', { amount: razorpayAmount });
 
             const options = {
                 key: rzpKey,
@@ -87,7 +178,7 @@ const RestaurantMenu = () => {
                             razorpay_order_id: response.razorpay_order_id,
                             razorpay_payment_id: response.razorpay_payment_id,
                             razorpay_signature: response.razorpay_signature,
-                            amount: overallTotal
+                            amount: razorpayAmount
                         });
 
                         // 3. Place the actual order if payment is verified
@@ -96,7 +187,8 @@ const RestaurantMenu = () => {
                             items: cart.map(c => ({ product_id: c.product_id, quantity: c.quantity, price: c.price })),
                             total_amount: overallTotal,
                             razorpay_order_id: response.razorpay_order_id,
-                            razorpay_payment_id: response.razorpay_payment_id
+                            razorpay_payment_id: response.razorpay_payment_id,
+                            payment_method: finalPaymentMethod
                         });
                     } catch (err) {
                         toast.error("Payment verification failed!");
@@ -214,7 +306,12 @@ const RestaurantMenu = () => {
                     <div className="sticky top-28 bg-white dark:bg-slate-800 rounded-3xl shadow-2xl border border-slate-100 dark:border-slate-700 p-8">
                         <h2 className="text-2xl font-black text-slate-900 dark:text-white mb-6 flex items-center justify-between">
                             Your Order
-                            <span className="bg-rose-100 dark:bg-rose-900/50 text-rose-600 dark:text-rose-400 text-sm px-3 py-1 rounded-full">{cart.reduce((t, i) => t + i.quantity, 0)}</span>
+                            <div className="flex items-center space-x-3">
+                                {cart.length > 0 && (
+                                    <button onClick={clearCart} className="text-xs text-rose-500 hover:text-rose-600 font-bold uppercase tracking-wide">Clear</button>
+                                )}
+                                <span className="bg-rose-100 dark:bg-rose-900/50 text-rose-600 dark:text-rose-400 text-sm px-3 py-1 rounded-full">{cart.reduce((t, i) => t + i.quantity, 0)}</span>
+                            </div>
                         </h2>
                         
                         {cart.length === 0 ? (
@@ -242,19 +339,45 @@ const RestaurantMenu = () => {
                                         <span>Food Total:</span>
                                         <span>Rs {cartTotal.toFixed(2)}</span>
                                     </div>
+                                    <div className="flex justify-between items-center">
+                                        <span>Delivery Charge {distanceStr && <span className="text-[10px] text-slate-400 font-normal ml-1">{distanceStr}</span>}:</span>
+                                        <span>Rs {deliveryFee.toFixed(2)}</span>
+                                    </div>
                                     <div className="flex justify-between">
-                                        <span>Delivery Charge:</span>
-                                        <span>Rs 25.00</span>
+                                        <span>Tax (5% GST):</span>
+                                        <span>Rs {tax.toFixed(2)}</span>
                                     </div>
                                     <div className="flex justify-between">
                                         <span>Platform Fee:</span>
-                                        <span>Rs 3.00</span>
-                                    </div>
-                                    <div className="flex justify-between items-center text-xl pt-3 border-t border-slate-100 dark:border-slate-800">
-                                        <span className="font-black text-slate-900 dark:text-white">Overall Total:</span>
-                                        <span className="font-black text-rose-500">Rs {(cartTotal + 28).toFixed(2)}</span>
+                                        <span>Rs {platformFee.toFixed(2)}</span>
                                     </div>
                                 </div>
+                                <div className="flex justify-between items-center pt-4 mt-4 border-t-2 border-slate-200 dark:border-slate-700 text-xl font-black text-slate-900 dark:text-white">
+                                    <span>To Pay:</span>
+                                    <span className="text-rose-500">
+                                        Rs {(useWallet && Number(custProfile?.wallet) > 0) ? Math.max(overallTotal - Number(custProfile.wallet), 0).toFixed(2) : overallTotal.toFixed(2)}
+                                    </span>
+                                </div>
+
+                                {custProfile && Number(custProfile.wallet) > 0 && (
+                                    <div 
+                                        className="mt-4 p-4 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl flex items-center justify-between cursor-pointer transition-all hover:bg-emerald-100" 
+                                        onClick={() => setUseWallet(!useWallet)}
+                                    >
+                                        <div className="flex items-center space-x-3">
+                                            <input 
+                                                type="checkbox" 
+                                                checked={useWallet} 
+                                                onChange={() => {}} 
+                                                className="w-5 h-5 text-emerald-600 rounded border-emerald-300 focus:ring-emerald-500 cursor-pointer pointer-events-none" 
+                                            />
+                                            <div className="flex flex-col">
+                                                <span className="text-sm font-bold text-slate-700 dark:text-slate-300">Use Wallet Balance</span>
+                                                <span className="text-xs text-emerald-600 font-bold">Rs {Number(custProfile.wallet).toFixed(2)} Available</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
 
                                 <button 
                                     onClick={handleCheckout} 

@@ -154,63 +154,92 @@ exports.pickupOrder = async (req, res) => {
     }
 };
 
-// @desc    Mark order as delivered
+// @desc    Mark order as delivered (Secure SQL Transaction for wallet splits)
 // @route   PUT /api/delivery/orders/:orderId/complete
 // @access  Private (Delivery only)
 exports.completeOrder = async (req, res) => {
+    const connection = await db.getConnection();
     try {
+        await connection.beginTransaction();
+
         const { orderId } = req.params;
+        const { otp } = req.body;
         
         // Security check: Ensure this specific delivery boy owns this order
-        const [[order]] = await db.query('SELECT id, restaurant_id, total_amount FROM orders WHERE id = ? AND delivery_boy_id = ?', [orderId, req.user.id]);
-        if (!order) return res.status(403).json({ message: "Unauthorized or order not found" });
+        const [[order]] = await connection.query(
+            'SELECT id, restaurant_id, total_amount, delivery_fee, tax, platform_fee, user_id, delivery_otp FROM orders WHERE id = ? AND delivery_boy_id = ?',
+            [orderId, req.user.id]
+        );
+        if (!order) {
+            await connection.rollback();
+            return res.status(403).json({ message: "Unauthorized or order not found" });
+        }
+
+        // OTP Verification
+        if (order.delivery_otp && String(order.delivery_otp) !== String(otp)) {
+            await connection.rollback();
+            return res.status(400).json({ message: "Invalid OTP. Please ask the customer for the correct 6-digit delivery PIN." });
+        }
 
         const overallTotal = Number(order.total_amount);
-        const deliveryFee = 25;
-        const platformFee = 3;
-        const foodCost = Math.max(0, overallTotal - (deliveryFee + platformFee));
+        const deliveryFee = Number(order.delivery_fee || 0);
+        const platformFee = Number(order.platform_fee || 0);
+        const tax = Number(order.tax || 0);
+        
+        // Exact Food Cost is total minus fees and tax
+        const foodCost = Math.max(0, overallTotal - (deliveryFee + platformFee + tax));
 
         // Determine 20% or 30% commission rate
         const commRate = foodCost <= 200 ? 0.20 : 0.30;
         const adminComm = foodCost * commRate;
         
-        const adminRevenue = platformFee + adminComm;
+        // Admin gets platform fee + GST tax + admin commission split
+        const adminRevenue = platformFee + tax + adminComm;
         const vendorRevenue = foodCost - adminComm;
         const driverRevenue = deliveryFee;
 
-        await db.query("UPDATE orders SET status = 'delivered' WHERE id = ?", [orderId]);
+        // Update order status
+        await connection.query("UPDATE orders SET status = 'delivered' WHERE id = ?", [orderId]);
 
-        // Real-time notification
-        const { getIO } = require('../utils/socket');
-        const io = getIO();
-        const [[orderInfo]] = await db.query('SELECT user_id FROM orders WHERE id = ?', [orderId]);
-        if (orderInfo) {
-            io.to(`user_${orderInfo.user_id}`).emit('order_update', {
+        // 1. Admin Wallet
+        const [[admin]] = await connection.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
+        if (admin) {
+            await connection.query("UPDATE users SET wallet = wallet + ? WHERE id = ?", [adminRevenue, admin.id]);
+        }
+
+        // 2. Delivery Boy Wallet
+        await connection.query("UPDATE users SET wallet = wallet + ? WHERE id = ?", [driverRevenue, req.user.id]);
+
+        // 3. Vendor Wallet
+        const [[restaurant]] = await connection.query("SELECT user_id FROM restaurants WHERE id = ?", [order.restaurant_id]);
+        if (restaurant) {
+            await connection.query("UPDATE users SET wallet = wallet + ? WHERE id = ?", [vendorRevenue, restaurant.user_id]);
+        }
+
+        // Commit all wallet updates atomically
+        await connection.commit();
+
+        // Real-time notification (outside transaction — non-critical)
+        try {
+            const { getIO } = require('../utils/socket');
+            const io = getIO();
+            io.to(`user_${order.user_id}`).emit('order_update', {
                 orderId,
                 status: 'delivered',
                 message: "Order delivered! Enjoy your meal."
             });
             io.to(`order_${orderId}`).emit('status_change', { status: 'delivered' });
+        } catch (socketErr) {
+            console.error("Socket notification failed:", socketErr.message);
         }
 
-        // 1. Admin Wallet
-        const [[admin]] = await db.query("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
-        if (admin) {
-            await db.query("UPDATE users SET wallet = wallet + ? WHERE id = ?", [adminRevenue, admin.id]);
-        }
-
-        // 2. Delivery Boy Wallet
-        await db.query("UPDATE users SET wallet = wallet + ? WHERE id = ?", [driverRevenue, req.user.id]);
-
-        // 3. Vendor Wallet
-        const [[restaurant]] = await db.query("SELECT user_id FROM restaurants WHERE id = ?", [order.restaurant_id]);
-        if (restaurant) {
-            await db.query("UPDATE users SET wallet = wallet + ? WHERE id = ?", [vendorRevenue, restaurant.user_id]);
-        }
         res.status(200).json({ message: "Delivery completed successfully!" });
     } catch (error) {
-        console.error(error);
+        await connection.rollback();
+        console.error('Complete order error:', error.message);
         res.status(500).json({ message: "Failed to complete order" });
+    } finally {
+        connection.release();
     }
 };
 

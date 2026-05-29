@@ -12,6 +12,7 @@ exports.getDashboardStats = async (req, res) => {
             [[{ total_orders }]],
             [[{ total_revenue }]],
             [[{ admin_wallet }]],
+            [[{ daily_orders }]],
             [orders]
         ] = await Promise.all([
             db.query('SELECT COUNT(*) as total_users FROM users'),
@@ -19,6 +20,7 @@ exports.getDashboardStats = async (req, res) => {
             db.query('SELECT COUNT(*) as total_orders FROM orders'),
             db.query("SELECT SUM(total_amount) as total_revenue FROM orders WHERE status = 'delivered'"),
             db.query("SELECT wallet as admin_wallet FROM users WHERE id = ?", [req.user.id]),
+            db.query("SELECT COUNT(*) as daily_orders FROM orders WHERE DATE(created_at) = CURDATE()"),
             db.query(`
                 SELECT o.*, u.name as customer_name, r.name as restaurant_name 
                 FROM orders o
@@ -30,14 +32,15 @@ exports.getDashboardStats = async (req, res) => {
 
         const computedOrders = orders.map(o => {
             const total = Number(o.total_amount || 0);
-            const deliveryFee = 25;
-            const platformFee = 3;
-            const foodCost = Math.max(0, total - (deliveryFee + platformFee));
+            const deliveryFee = Number(o.delivery_fee || 0);
+            const platformFee = Number(o.platform_fee || 0);
+            const tax = Number(o.tax || 0);
+            const foodCost = Math.max(0, total - (deliveryFee + platformFee + tax));
             
             const commRate = foodCost <= 200 ? 0.20 : 0.30;
             const adminComm = foodCost * commRate;
             
-            const adminEarned = platformFee + adminComm;
+            const adminEarned = platformFee + tax + adminComm;
             const vendorEarned = foodCost - adminComm;
 
             return {
@@ -54,6 +57,7 @@ exports.getDashboardStats = async (req, res) => {
             total_users,
             total_vendors,
             total_orders,
+            daily_orders,
             total_revenue: total_revenue || 0,
             admin_wallet: admin_wallet || 0,
             orders: computedOrders
@@ -93,10 +97,33 @@ exports.toggleRestaurantStatus = async (req, res) => {
 // @access  Private (Admin only)
 exports.getAllUsers = async (req, res) => {
     try {
-        // Safely ensure is_active column exists
-        try { await db.query("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE"); } catch (e) {}
+        const [users] = await db.query(`
+            SELECT 
+                u.id, u.name, u.email, u.role, u.is_active, u.wallet, u.created_at,
 
-        const [users] = await db.query('SELECT id, name, email, role, is_active, created_at FROM users ORDER BY created_at DESC');
+                -- Vendor: wallet IS their total lifetime earnings (credited on each order completion)
+                CASE WHEN u.role = 'vendor' THEN u.wallet ELSE 0 END AS vendor_total_earned,
+
+                -- Delivery: wallet IS their total lifetime earnings (credited on each order completion)
+                CASE WHEN u.role = 'delivery' THEN u.wallet ELSE 0 END AS delivery_total_earned,
+
+                -- Bonus: count of delivered orders for context
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM orders o
+                    JOIN restaurants r ON o.restaurant_id = r.id
+                    WHERE r.user_id = u.id AND o.status = 'delivered'
+                ), 0) AS vendor_orders_count,
+
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM orders o
+                    WHERE o.delivery_boy_id = u.id AND o.status = 'delivered'
+                ), 0) AS delivery_orders_count
+
+            FROM users u
+            ORDER BY u.created_at DESC
+        `);
         res.status(200).json(users);
     } catch (error) {
         console.error(error);
@@ -115,8 +142,6 @@ exports.toggleUserStatus = async (req, res) => {
         if (Number(id) === req.user.id) {
             return res.status(400).json({ message: "Security Breach: You cannot block yourself!" });
         }
-
-        try { await db.query("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE"); } catch (e) {}
 
         const [result] = await db.query('UPDATE users SET is_active = ? WHERE id = ?', [is_active, id]);
         

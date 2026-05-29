@@ -73,3 +73,36 @@ exports.verifyPayment = async (req, res) => {
         res.status(500).json({ message: "Failed to verify payment" });
     }
 };
+
+// @desc    Mock withdraw funds from wallet
+// @route   POST /api/payments/withdraw
+// @access  Private
+exports.withdrawFunds = async (req, res) => {
+    try {
+        const { amount, method, destination } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ message: "Invalid withdrawal amount" });
+        }
+        if (!destination) {
+            return res.status(400).json({ message: "Destination account (UPI/Bank) is required" });
+        }
+
+        const [[user]] = await db.query("SELECT wallet FROM users WHERE id = ? FOR UPDATE", [req.user.id]);
+        
+        if (Number(user.wallet) < amount) {
+            return res.status(400).json({ message: "Insufficient wallet balance for withdrawal" });
+        }
+
+        // Deduct from wallet
+        await db.query("UPDATE users SET wallet = wallet - ? WHERE id = ?", [amount, req.user.id]);
+
+        res.status(200).json({ 
+            message: `Successfully withdrew Rs ${amount} to ${method} (${destination}).`,
+            remaining_balance: Number(user.wallet) - amount
+        });
+    } catch (error) {
+        console.error("Withdrawal error:", error);
+        res.status(500).json({ message: "Failed to process withdrawal" });
+    }
+};

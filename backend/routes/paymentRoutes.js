@@ -8,5 +8,6 @@ router.use(verifyToken);
 
 router.post('/create-order', paymentController.createOrder);
 router.post('/verify', paymentController.verifyPayment);
+router.post('/withdraw', paymentController.withdrawFunds);
 
 module.exports = router;

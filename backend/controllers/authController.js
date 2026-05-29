@@ -2,18 +2,41 @@ const db = require('../config/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
+// Email regex for strict validation
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ALLOWED_ROLES = ['customer', 'vendor', 'delivery']; // Admin cannot self-register
+
 // 1. REGISTER USER
 exports.register = async (req, res) => {
     try {
         const { name, email, password, role, latitude, longitude } = req.body;
 
-        // Validation
+        // --- Strict Validation ---
         if (!name || !email || !password) {
             return res.status(400).json({ message: "Please provide name, email and password" });
         }
 
+        if (name.trim().length < 2 || name.trim().length > 100) {
+            return res.status(400).json({ message: "Name must be between 2 and 100 characters" });
+        }
+
+        if (!EMAIL_REGEX.test(email)) {
+            return res.status(400).json({ message: "Please provide a valid email address" });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({ message: "Password must be at least 6 characters long" });
+        }
+
+        if (password.length > 128) {
+            return res.status(400).json({ message: "Password must not exceed 128 characters" });
+        }
+
+        // Block admin self-registration — admins are created manually in DB
+        const sanitizedRole = ALLOWED_ROLES.includes(role) ? role : 'customer';
+
         // Check if user already exists
-        const [existingUser] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        const [existingUser] = await db.query('SELECT id FROM users WHERE email = ?', [email.toLowerCase().trim()]);
         if (existingUser.length > 0) {
             return res.status(400).json({ message: "User already exists with this email" });
         }
@@ -25,7 +48,7 @@ exports.register = async (req, res) => {
         // Insert user into database
         const [result] = await db.query(
             'INSERT INTO users (name, email, password_hash, role, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?)',
-            [name, email, hashedPassword, role || 'customer', latitude || null, longitude || null]
+            [name.trim(), email.toLowerCase().trim(), hashedPassword, sanitizedRole, latitude || null, longitude || null]
         );
 
         res.status(201).json({ 
@@ -34,7 +57,7 @@ exports.register = async (req, res) => {
         });
 
     } catch (error) {
-        console.error(error);
+        console.error('Registration error:', error.message);
         res.status(500).json({ message: "Server error during registration" });
     }
 };
@@ -49,8 +72,12 @@ exports.login = async (req, res) => {
             return res.status(400).json({ message: "Please provide email and password" });
         }
 
+        if (!EMAIL_REGEX.test(email)) {
+            return res.status(400).json({ message: "Please provide a valid email address" });
+        }
+
         // Find user by email
-        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        const [users] = await db.query('SELECT * FROM users WHERE email = ?', [email.toLowerCase().trim()]);
         if (users.length === 0) {
             return res.status(401).json({ message: "Invalid email or password" });
         }
@@ -88,7 +115,7 @@ exports.login = async (req, res) => {
         });
 
     } catch (error) {
-        console.error(error);
+        console.error('Login error:', error.message);
         res.status(500).json({ message: "Server error during login" });
     }
 };
@@ -102,7 +129,7 @@ exports.getProfile = async (req, res) => {
         if (!user) return res.status(404).json({ message: "User not found" });
         res.status(200).json(user);
     } catch (error) {
-        console.error(error);
+        console.error('Profile fetch error:', error.message);
         res.status(500).json({ message: "Failed to retrieve profile information" });
     }
 };

@@ -1,5 +1,8 @@
 const db = require('../config/db');
 
+// Allowed order status transitions for vendor
+const ALLOWED_STATUSES = ['preparing', 'out_for_delivery', 'delivered', 'cancelled'];
+
 // Helper function to get the vendor's restaurant ID securely
 const getRestaurantId = async (userId) => {
     const [[restaurant]] = await db.query('SELECT id FROM restaurants WHERE user_id = ?', [userId]);
@@ -11,19 +14,27 @@ const getRestaurantId = async (userId) => {
 // @access  Private (Vendor only)
 exports.createRestaurantProfile = async (req, res) => {
     try {
-        const { name, address, description, image_url, latitude, longitude } = req.body;
+        const { name, address, description, image_url, latitude, longitude, cost_for_two } = req.body;
+
+        // --- Validation ---
+        if (!name || !name.trim()) {
+            return res.status(400).json({ message: "Restaurant name is required." });
+        }
+        if (!address || !address.trim()) {
+            return res.status(400).json({ message: "Restaurant address is required." });
+        }
         
         // Prevent creating multiple restaurants for one vendor
         const existingId = await getRestaurantId(req.user.id);
         if (existingId) return res.status(400).json({ message: "Profile already exists." });
 
         const [result] = await db.query(
-            'INSERT INTO restaurants (user_id, name, address, description, image_url, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [req.user.id, name, address, description, image_url, latitude, longitude]
+            'INSERT INTO restaurants (user_id, name, address, description, image_url, latitude, longitude, cost_for_two) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [req.user.id, name.trim(), address.trim(), description || '', image_url || '', latitude || null, longitude || null, cost_for_two || 300]
         );
         res.status(201).json({ message: "Restaurant profile created!", restaurantId: result.insertId });
     } catch (error) {
-        console.error(error);
+        console.error('Create profile error:', error.message);
         res.status(500).json({ message: "Failed to create profile" });
     }
 };
@@ -75,14 +86,25 @@ exports.addProduct = async (req, res) => {
             return res.status(403).json({ message: "You must create a restaurant profile first." });
         }
 
+        // --- Validation ---
+        if (!name || !name.trim()) {
+            return res.status(400).json({ message: "Product name is required." });
+        }
+        if (!price || isNaN(price) || Number(price) <= 0) {
+            return res.status(400).json({ message: "Price must be a positive number." });
+        }
+        if (type && !['food', 'accessory'].includes(type)) {
+            return res.status(400).json({ message: "Type must be 'food' or 'accessory'." });
+        }
+
         const [result] = await db.query(
             'INSERT INTO products (restaurant_id, name, description, price, type, image_url) VALUES (?, ?, ?, ?, ?, ?)',
-            [restaurant_id, name, description, price, type, image_url]
+            [restaurant_id, name.trim(), description || '', Number(price), type || 'food', image_url || '']
         );
 
         res.status(201).json({ message: "Product added successfully", productId: result.insertId });
     } catch (error) {
-        console.error(error);
+        console.error('Add product error:', error.message);
         res.status(500).json({ message: "Failed to add product" });
     }
 };
@@ -167,10 +189,15 @@ exports.getVendorOrders = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
     try {
         const { orderId } = req.params;
-        const { status } = req.body; // 'preparing', 'out_for_delivery', 'delivered'
+        const { status } = req.body;
         const restaurant_id = await getRestaurantId(req.user.id);
 
         if (!restaurant_id) return res.status(403).json({ message: "Access denied." });
+
+        // --- Status Whitelist Validation (Security Fix) ---
+        if (!status || !ALLOWED_STATUSES.includes(status)) {
+            return res.status(400).json({ message: `Invalid status. Allowed: ${ALLOWED_STATUSES.join(', ')}` });
+        }
 
         // Security check: Make sure this order belongs to this specific vendor
         const [[order]] = await db.query('SELECT id FROM orders WHERE id = ? AND restaurant_id = ?', [orderId, restaurant_id]);
@@ -179,9 +206,6 @@ exports.updateOrderStatus = async (req, res) => {
             return res.status(404).json({ message: "Order not found or unauthorized." });
         }
 
-        const { getIO } = require('../utils/socket');
-        const io = getIO();
-
         if (status === 'cancelled') {
             await db.query("UPDATE orders SET status = 'cancelled', total_amount = 0 WHERE id = ?", [orderId]);
         } else {
@@ -189,20 +213,25 @@ exports.updateOrderStatus = async (req, res) => {
         }
 
         // Notify customer via socket
-        const [[orderInfo]] = await db.query('SELECT user_id FROM orders WHERE id = ?', [orderId]);
-        if (orderInfo) {
-            io.to(`user_${orderInfo.user_id}`).emit('order_update', {
-                orderId,
-                status,
-                message: `Your order status has been updated to: ${status}`
-            });
-            // Also notify the specific order room
-            io.to(`order_${orderId}`).emit('status_change', { status });
+        try {
+            const { getIO } = require('../utils/socket');
+            const io = getIO();
+            const [[orderInfo]] = await db.query('SELECT user_id FROM orders WHERE id = ?', [orderId]);
+            if (orderInfo) {
+                io.to(`user_${orderInfo.user_id}`).emit('order_update', {
+                    orderId,
+                    status,
+                    message: `Your order status has been updated to: ${status}`
+                });
+                io.to(`order_${orderId}`).emit('status_change', { status });
+            }
+        } catch (socketErr) {
+            console.error('Socket notification failed:', socketErr.message);
         }
 
         res.status(200).json({ message: `Order status updated to ${status}` });
     } catch (error) {
-        console.error(error);
+        console.error('Update order status error:', error.message);
         res.status(500).json({ message: "Failed to update order status" });
     }
 };
@@ -230,14 +259,14 @@ exports.toggleStatus = async (req, res) => {
 // @access  Private (Vendor only)
 exports.updateProfile = async (req, res) => {
     try {
-        const { name, address, description, image_url } = req.body;
+        const { name, address, description, image_url, cost_for_two } = req.body;
         const restaurant_id = await getRestaurantId(req.user.id);
 
         if (!restaurant_id) return res.status(403).json({ message: "Access denied." });
 
         await db.query(
-            'UPDATE restaurants SET name = ?, address = ?, description = ?, image_url = ? WHERE id = ?',
-            [name, address, description, image_url, restaurant_id]
+            'UPDATE restaurants SET name = ?, address = ?, description = ?, image_url = ?, cost_for_two = ? WHERE id = ?',
+            [name, address, description, image_url, cost_for_two || 300, restaurant_id]
         );
 
         res.status(200).json({ message: "Profile updated successfully!" });

@@ -4,6 +4,7 @@ import api from '../../utils/api';
 import Navbar from '../../components/Navbar';
 import { calculateDistance } from '../../utils/location';
 import toast from 'react-hot-toast';
+import socket from '../../utils/socket';
 
 const DeliveryDashboard = () => {
     const queryClient = useQueryClient();
@@ -28,6 +29,13 @@ const DeliveryDashboard = () => {
         queryFn: async () => { const { data } = await api.get('/delivery/orders/history'); return data; }
     });
 
+    // Fetch actual wallet balance — the real source of truth for earnings
+    const { data: authProfile } = useQuery({
+        queryKey: ['authProfile'],
+        queryFn: async () => { const { data } = await api.get('/auth/profile'); return data; },
+        refetchInterval: 10000 // Stay in sync after every completed order
+    });
+
     // Stream the driver's GPS location
     useEffect(() => {
         if (navigator.geolocation) {
@@ -40,25 +48,48 @@ const DeliveryDashboard = () => {
         }
     }, []);
 
-    // Sync location to server every 10 seconds if active mission exists
+    // Sync location via WebSocket (high frequency) and API (low frequency)
     useEffect(() => {
         if (!driverLocation.lat || !activeOrder) return;
 
-        const interval = setInterval(async () => {
+        // Ensure socket is connected
+        if (!socket.connected) {
+            const token = localStorage.getItem('craveroute_token');
+            if (token) {
+                socket.auth = { token };
+            }
+            socket.connect();
+        }
+
+        // 1. WebSocket Broadcast (High Frequency - every 3 seconds)
+        const socketInterval = setInterval(() => {
+            socket.emit('driver_location', {
+                orderId: activeOrder.id,
+                latitude: driverLocation.lat,
+                longitude: driverLocation.lng
+            });
+        }, 3000);
+
+        // 2. REST API Persist (Low Frequency - every 30 seconds)
+        const apiInterval = setInterval(async () => {
             try {
                 await api.put('/delivery/location', {
                     latitude: driverLocation.lat,
                     longitude: driverLocation.lng
                 });
             } catch (err) {
-                console.error("Failed to sync location", err);
+                console.error("Failed to sync location to DB", err);
             }
-        }, 10000);
+        }, 30000);
 
-        return () => clearInterval(interval);
-    }, [driverLocation.lat, !!activeOrder]);
+        return () => {
+            clearInterval(socketInterval);
+            clearInterval(apiInterval);
+        };
+    }, [driverLocation.lat, activeOrder?.id]);
 
-    const totalEarnings = (historyOrders?.length || 0) * 20;
+    // Use actual wallet balance from DB — credited per completed delivery (accurate)
+    const totalEarnings = Number(authProfile?.wallet || 0);
 
     const acceptMut = useMutation({
         mutationFn: async (orderId) => api.put(`/delivery/orders/${orderId}/accept`),
@@ -78,11 +109,14 @@ const DeliveryDashboard = () => {
     });
 
     const completeMut = useMutation({
-        mutationFn: async (orderId) => api.put(`/delivery/orders/${orderId}/complete`),
+        mutationFn: async ({ orderId, otp }) => api.put(`/delivery/orders/${orderId}/complete`, { otp }),
         onSuccess: () => { 
             queryClient.invalidateQueries({ queryKey: ['activeOrder'] }); 
             queryClient.invalidateQueries({ queryKey: ['deliveryHistory'] }); 
             toast.success("✅ Delivered! Payout added to your logbook."); 
+        },
+        onError: (err) => {
+            toast.error(err.response?.data?.message || "Failed to mark as delivered");
         }
     });
 
@@ -133,7 +167,7 @@ const DeliveryDashboard = () => {
                             <h1 className="text-2xl font-black text-slate-900 dark:text-white leading-tight">Logistics Hub</h1>
                             <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">CraveRoute Platform</p>
                             <div className="mt-2 inline-flex items-center bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400 px-3 py-1 rounded-xl text-xs font-bold">
-                                💰 Total Earnings: ₹{totalEarnings.toFixed(2)}
+                                💰 Wallet Balance: Rs {totalEarnings.toFixed(2)}
                             </div>
                         </div>
                     </div>
@@ -211,7 +245,12 @@ const DeliveryDashboard = () => {
                                         {pickupMut.isPending ? 'Processing...' : 'Picked Up (Out for Delivery) 🚚'}
                                     </button>
                                 ) : (
-                                    <button onClick={() => completeMut.mutate(activeOrder.id)} disabled={completeMut.isPending} className="w-full py-5 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-2xl font-black text-lg shadow-xl shadow-green-500/30 transition-all hover:-translate-y-1 active:scale-95 disabled:opacity-50">
+                                    <button onClick={() => {
+                                        const enteredOtp = window.prompt("Please enter the 6-digit Delivery PIN provided by the customer:");
+                                        if (enteredOtp) {
+                                            completeMut.mutate({ orderId: activeOrder.id, otp: enteredOtp });
+                                        }
+                                    }} disabled={completeMut.isPending} className="w-full py-5 bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-2xl font-black text-lg shadow-xl shadow-green-500/30 transition-all hover:-translate-y-1 active:scale-95 disabled:opacity-50">
                                         {completeMut.isPending ? 'Processing...' : 'Mark as Delivered ✔️'}
                                     </button>
                                 )}

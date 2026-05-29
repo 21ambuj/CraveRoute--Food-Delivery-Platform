@@ -19,11 +19,9 @@ exports.verifyToken = async (req, res, next) => {
         
         // Attach the decoded user information (id, role) to the request object
         req.user = decoded;
-        console.log('Token Verified Successfully. Decoded User:', decoded);
         
         next();
     } catch (error) {
-        console.error('JWT Verification Error:', error.message);
         return res.status(403).json({ message: "Invalid or expired token." });
     }
 };
@@ -34,10 +32,7 @@ exports.verifyToken = async (req, res, next) => {
  */
 exports.authorizeRole = (...allowedRoles) => {
     return (req, res, next) => {
-        // req.user is set by the verifyToken middleware
-        console.log(`AuthorizeRole Check: User Role = '${req.user?.role}', Allowed Roles =`, allowedRoles);
         if (!req.user || !allowedRoles.includes(req.user.role)) {
-            console.log(`Access Denied for Role: '${req.user?.role}'`);
             return res.status(403).json({ 
                 message: `Access Denied. Required role: ${allowedRoles.join(' or ')}.` 
             });

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS restaurants (
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+
 -- 4. Products Table
 CREATE TABLE IF NOT EXISTS products (
     id INT AUTO_INCREMENT PRIMARY KEY,

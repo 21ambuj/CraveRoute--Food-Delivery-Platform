@@ -33,7 +33,15 @@ const Navbar = () => {
     useEffect(() => {
         if (!user?.id) return;
 
+        let socketInstance = null;
+
         import('../utils/socket').then(({ default: socket }) => {
+            socketInstance = socket;
+            // Get token from localStorage
+            const token = localStorage.getItem('craveroute_token');
+            if (token) {
+                socket.auth = { token };
+            }
             socket.connect();
             socket.emit('join', user.id);
 
@@ -42,12 +50,14 @@ const Navbar = () => {
                 logout();
                 navigate('/login');
             });
-
-            return () => {
-                socket.off('user_blocked');
-            };
         });
-    }, [user?.id]);
+
+        return () => {
+            if (socketInstance) {
+                socketInstance.off('user_blocked');
+            }
+        };
+    }, [user?.id, logout, navigate]);
 
     return (
         <nav className="sticky top-0 z-50 w-full backdrop-blur-md bg-white/70 dark:bg-slate-900/80 border-b border-slate-200 dark:border-slate-800 transition-colors duration-300">

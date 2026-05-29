@@ -6,9 +6,21 @@ import Navbar from '../../components/Navbar';
 import toast from 'react-hot-toast';
 import { calculateDistance } from '../../utils/location';
 import LiveMap from '../../components/LiveMap';
+import WalletHub from '../../components/WalletHub';
 
-const fetchRestaurants = async () => {
-    const { data } = await api.get('/restaurants');
+const fetchRestaurants = async (lat, lng, filters) => {
+    let url = '/restaurants?';
+    const params = new URLSearchParams();
+    if (lat && lng) {
+        params.append('lat', lat);
+        params.append('lng', lng);
+    }
+    if (filters.tag) params.append('tag', filters.tag);
+    if (filters.min_rating) params.append('min_rating', filters.min_rating);
+    if (filters.fast_delivery) params.append('fast_delivery', 'true');
+    if (filters.sort_by) params.append('sort_by', filters.sort_by);
+    
+    const { data } = await api.get(url + params.toString());
     return data;
 };
 
@@ -30,6 +42,7 @@ const CustomerDashboard = () => {
     const [activeTab, setActiveTab] = useState('explore');
     const [driverLocs, setDriverLocs] = useState({}); // { orderId: { lat, lng } }
     const [searchTerm, setSearchTerm] = useState('');
+    const [filters, setFilters] = useState({ tag: '', min_rating: '', fast_delivery: false, sort_by: '' });
     const [userLocation, setUserLocation] = useState({ lat: null, lng: null });
     const [ratingModal, setRatingModal] = useState({ show: false, orderId: null, restaurantId: null, restaurantName: '' });
     const [ratingForm, setRatingForm] = useState({ rating: 5, comment: '' });
@@ -46,8 +59,8 @@ const CustomerDashboard = () => {
     }, []);
     
     const { data: restaurants, isLoading: resLoading } = useQuery({
-        queryKey: ['restaurants'],
-        queryFn: fetchRestaurants,
+        queryKey: ['restaurants', userLocation.lat, userLocation.lng, filters],
+        queryFn: () => fetchRestaurants(userLocation.lat, userLocation.lng, filters),
         refetchInterval: 5000 
     });
 
@@ -70,33 +83,56 @@ const CustomerDashboard = () => {
         refetchInterval: activeTab === 'orders' ? 5000 : false 
     });
 
-    // --- Real-time Socket Connection (MOVED AFTER INITIALIZATION) ---
+    // --- Real-time Socket Connection ---
     useEffect(() => {
         if (!custProfile?.id) return;
         
+        let socketInstance;
+
         import('../../utils/socket').then(({ default: socket }) => {
+            socketInstance = socket;
+            const token = localStorage.getItem('craveroute_token');
+            if (token) {
+                socket.auth = { token };
+            }
             socket.connect();
+            
+            // 1. Join personal user room
             socket.emit('join', custProfile.id);
 
+            // 2. Join specific rooms for all active orders
+            if (myOrders && myOrders.length > 0) {
+                myOrders.forEach(order => {
+                    if (['accepted', 'out_for_delivery'].includes(order.status)) {
+                        socket.emit('join_order', order.id);
+                    }
+                });
+            }
+
+            // Listen for general order status updates
             socket.on('order_update', (data) => {
                 toast.success(data.message, { icon: '🚀', duration: 6000 });
                 refetchOrders();
                 refetchProfile();
             });
 
-            socket.on('driver_location', (data) => {
+            // Listen for high-frequency location updates from the driver via WebSockets
+            socket.on('location_update', (data) => {
                 setDriverLocs(prev => ({
                     ...prev,
                     [data.orderId]: { lat: data.latitude, lng: data.longitude }
                 }));
             });
-
-            return () => {
-                socket.off('order_update');
-                socket.disconnect();
-            };
         });
-    }, [custProfile?.id]);
+
+        return () => {
+            if (socketInstance) {
+                socketInstance.off('order_update');
+                socketInstance.off('location_update');
+                socketInstance.disconnect();
+            }
+        };
+    }, [custProfile?.id, myOrders]);
 
     const submitRatingMut = useMutation({
         mutationFn: (data) => api.post(`/restaurants/${data.restaurantId}/rate`, { 
@@ -170,6 +206,42 @@ const CustomerDashboard = () => {
                                         <button className="mr-3 px-8 py-4 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-2xl font-black transition-all hover:scale-105 active:scale-95">Search</button>
                                     </div>
                                 </div>
+
+                                {/* FILTER RIBBON */}
+                                <div className="mt-6 max-w-2xl mx-auto lg:mx-0 flex flex-wrap gap-3">
+                                    <button 
+                                        onClick={() => setFilters(f => ({ ...f, tag: f.tag === 'Pure Veg' ? '' : 'Pure Veg' }))}
+                                        className={`px-4 py-2 rounded-full border text-sm font-bold transition-all ${filters.tag === 'Pure Veg' ? 'bg-green-100 border-green-500 text-green-700 dark:bg-green-900/30' : 'bg-white border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 hover:bg-slate-50'}`}
+                                    >
+                                        🌱 Pure Veg
+                                    </button>
+                                    <button 
+                                        onClick={() => setFilters(f => ({ ...f, min_rating: f.min_rating === '4.0' ? '' : '4.0' }))}
+                                        className={`px-4 py-2 rounded-full border text-sm font-bold transition-all ${filters.min_rating === '4.0' ? 'bg-orange-100 border-orange-500 text-orange-700 dark:bg-orange-900/30' : 'bg-white border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 hover:bg-slate-50'}`}
+                                    >
+                                        ⭐ Rating 4.0+
+                                    </button>
+                                    <button 
+                                        onClick={() => setFilters(f => ({ ...f, fast_delivery: !f.fast_delivery }))}
+                                        className={`px-4 py-2 rounded-full border text-sm font-bold transition-all ${filters.fast_delivery ? 'bg-rose-100 border-rose-500 text-rose-700 dark:bg-rose-900/30' : 'bg-white border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 hover:bg-slate-50'}`}
+                                    >
+                                        ⚡ Fast Delivery
+                                    </button>
+                                    <button 
+                                        onClick={() => setFilters(f => ({ ...f, sort_by: f.sort_by === 'cost_low' ? '' : 'cost_low' }))}
+                                        className={`px-4 py-2 rounded-full border text-sm font-bold transition-all ${filters.sort_by === 'cost_low' ? 'bg-blue-100 border-blue-500 text-blue-700 dark:bg-blue-900/30' : 'bg-white border-slate-200 text-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 hover:bg-slate-50'}`}
+                                    >
+                                        💰 Cost: Low to High
+                                    </button>
+                                    {(filters.tag || filters.min_rating || filters.fast_delivery || filters.sort_by) && (
+                                        <button 
+                                            onClick={() => setFilters({ tag: '', min_rating: '', fast_delivery: false, sort_by: '' })}
+                                            className="px-4 py-2 rounded-full text-sm font-bold text-rose-500 hover:text-rose-600 transition-all underline"
+                                        >
+                                            Clear All
+                                        </button>
+                                    )}
+                                </div>
                             </div>
 
                             {/* Hero Image Mockup (Decorative) */}
@@ -212,10 +284,19 @@ const CustomerDashboard = () => {
                             >
                                 Track Orders {myOrders?.length > 0 && <span className="ml-2 w-5 h-5 bg-rose-500 text-white rounded-full text-[10px] inline-flex items-center justify-center">{myOrders.length}</span>}
                             </button>
+                            <button 
+                                onClick={() => setActiveTab('wallet')}
+                                className={`px-8 py-3 text-sm font-black rounded-xl transition-all ${activeTab === 'wallet' ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-lg' : 'text-slate-500 hover:text-slate-900'}`}
+                            >
+                                Wallet Hub
+                            </button>
                         </div>
 
                         <div className="flex items-center space-x-4">
-                            <div className="flex items-center space-x-2 px-5 py-3 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-600 dark:text-emerald-400 shadow-sm">
+                            <div 
+                                onClick={() => setActiveTab('wallet')}
+                                className="flex items-center space-x-2 px-5 py-3 bg-emerald-500/10 hover:bg-emerald-500/20 transition-all border border-emerald-500/20 rounded-2xl text-emerald-600 dark:text-emerald-400 shadow-sm cursor-pointer active:scale-95"
+                            >
                                 <span className="text-lg">💳</span>
                                 <div className="flex flex-col items-start">
                                     <span className="text-[9px] font-black uppercase tracking-wide opacity-80">Wallet Balance</span>
@@ -230,9 +311,44 @@ const CustomerDashboard = () => {
                     </div>
                 </div>
 
+                {/* --- WALLET VIEW --- */}
+                {activeTab === 'wallet' && (
+                    <WalletHub balance={custProfile?.wallet || 0} user={custProfile} refetchProfile={refetchProfile} />
+                )}
+
                 {/* --- EXPLORE VIEW --- */}
                 {activeTab === 'explore' && (
                     <div className="animate-fade-in">
+
+                        {/* --- CRAVE AI RECOMMENDATIONS --- */}
+                        <div className="mb-12 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 rounded-[2.5rem] p-1 relative overflow-hidden shadow-2xl">
+                            <div className="absolute inset-0 opacity-20 mix-blend-overlay"></div>
+                            <div className="bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl rounded-[2.4rem] p-8 relative z-10">
+                                <div className="flex items-center mb-6">
+                                    <div className="w-12 h-12 rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 flex items-center justify-center text-white text-xl shadow-lg mr-4 animate-pulse">
+                                        ✨
+                                    </div>
+                                    <div>
+                                        <h3 className="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-indigo-500 to-purple-600">CraveAI Picks For You</h3>
+                                        <p className="text-sm font-bold text-slate-500 dark:text-slate-400">Based on your recent cravings & location</p>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                    {filteredRestaurants?.slice(0, 3).map((restaurant, idx) => (
+                                        <div key={`ai-${restaurant.id}`} onClick={() => Number(restaurant.is_active) && navigate(`/customer/restaurant/${restaurant.id}`)} className="flex items-center space-x-4 bg-slate-50 dark:bg-slate-800 p-4 rounded-2xl cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors border border-slate-100 dark:border-slate-700">
+                                            <div className="w-16 h-16 rounded-xl overflow-hidden relative">
+                                                <img src={restaurant.image_url || `https://images.unsplash.com/photo-1504674900247-0877df9cc836?q=80&w=400`} className="w-full h-full object-cover" />
+                                            </div>
+                                            <div>
+                                                <h4 className="font-bold text-slate-900 dark:text-white line-clamp-1">{restaurant.name}</h4>
+                                                <span className="text-xs text-indigo-500 font-black px-2 py-1 bg-indigo-100 dark:bg-indigo-900/30 rounded-full mt-1 inline-block">98% Match</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
                         <div className="flex items-baseline justify-between mb-8">
                             <h2 className="text-3xl font-black text-slate-900 dark:text-white">Featured Restaurants</h2>
                             <span className="text-sm font-bold text-slate-400">{filteredRestaurants?.length || 0} Places Nearby</span>
@@ -249,9 +365,14 @@ const CustomerDashboard = () => {
                                     const isClosed = !Number(restaurant.is_active);
                                     
                                     // Use specific keyword-based images for Veg / Daily Needs
-                                    const imgKeywords = ['vegetarian-food', 'fresh-vegetables', 'grocery-store', 'organic-food', 'daily-needs', 'spices'];
-                                    const defaultImg = `https://source.unsplash.com/featured/800x600?${imgKeywords[idx % imgKeywords.length]}`;
+                                    const defaultImg = `https://images.unsplash.com/photo-1504674900247-0877df9cc836?q=80&w=800`;
                                     const imgUrl = restaurant.image_url || defaultImg;
+                                    
+                                    let tags = [];
+                                    try {
+                                        if (restaurant.tags) tags = JSON.parse(restaurant.tags);
+                                    } catch(e) {}
+
                                     
                                     return (
                                         <div 
@@ -291,18 +412,32 @@ const CustomerDashboard = () => {
                                             </div>
 
                                             <div className="p-7">
-                                                <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-2 mb-4 font-medium h-10">
+                                                <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-2 mb-3 font-medium h-10">
                                                     {restaurant.description || "Fresh ingredients, authentic recipes, and a passion for great food."}
                                                 </p>
+
+                                                {tags.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1 mb-4 h-6 overflow-hidden">
+                                                        {tags.map((tag, i) => (
+                                                            <span key={i} className="text-[9px] font-bold text-slate-500 bg-slate-100 dark:bg-slate-700 dark:text-slate-300 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-600">
+                                                                {tag}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 
                                                 <div className="flex items-center text-slate-400 text-xs font-bold uppercase tracking-wider mb-5 line-clamp-1">
                                                     <span className="mr-2">📍</span> {restaurant.address}
                                                 </div>
                                                 
-                                                <div className="flex justify-between items-center pt-5 border-t border-slate-50 dark:border-slate-700/50">
+                                                <div className="flex justify-between items-center pt-4 border-t border-slate-50 dark:border-slate-700/50">
                                                     <div className="flex flex-col">
-                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">Estimated Distance</span>
-                                                        <span className="text-xl font-black text-slate-900 dark:text-white">{dist !== null ? `${dist.toFixed(1)} km` : '--'}</span>
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">Distance</span>
+                                                        <span className="text-lg font-black text-slate-900 dark:text-white">{dist !== null ? `${dist.toFixed(1)} km` : '--'}</span>
+                                                    </div>
+                                                    <div className="flex flex-col items-end mr-4">
+                                                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-tighter mb-1">Cost for Two</span>
+                                                        <span className="text-lg font-black text-slate-900 dark:text-white">Rs {restaurant.cost_for_two || 300}</span>
                                                     </div>
                                                     <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${isClosed ? 'bg-slate-100 text-slate-400' : 'bg-rose-500 text-white group-hover:scale-110 shadow-lg shadow-rose-500/20'}`}>
                                                         <span className="text-xl">➔</span>
@@ -402,12 +537,19 @@ const CustomerDashboard = () => {
                                                 
                                                 {order.status === 'delivered' && (
                                                     <div className="mt-8 pt-8 border-t border-slate-50 dark:border-slate-800 flex justify-end">
-                                                        <button 
-                                                            onClick={() => setRatingModal({ show: true, orderId: order.id, restaurantId: order.restaurant_id, restaurantName: order.restaurant_name })}
-                                                            className="px-6 py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-xl font-black text-sm hover:scale-105 transition-all"
-                                                        >
-                                                            Rate Experience ⭐
-                                                        </button>
+                                                        {order.given_rating ? (
+                                                            <div className="flex items-center space-x-2 px-4 py-2 bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+                                                                <span className="text-xs font-black text-slate-400 uppercase tracking-widest">You Rated:</span>
+                                                                <span className="text-sm font-black text-orange-400">{'⭐'.repeat(order.given_rating)}</span>
+                                                            </div>
+                                                        ) : (
+                                                            <button 
+                                                                onClick={() => setRatingModal({ show: true, orderId: order.id, restaurantId: order.restaurant_id, restaurantName: order.restaurant_name })}
+                                                                className="px-6 py-3 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-xl font-black text-sm hover:scale-105 transition-all"
+                                                            >
+                                                                Rate Experience ⭐
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 )}
 
@@ -419,6 +561,18 @@ const CustomerDashboard = () => {
                                                             </div>
                                                             <span className="text-xs font-black text-slate-400 uppercase tracking-widest">{progress} complete</span>
                                                         </div>
+
+                                                        {order.delivery_otp && (
+                                                            <div className="mb-6 p-4 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-100 dark:border-indigo-800/50 rounded-2xl flex items-center justify-between">
+                                                                <div>
+                                                                    <p className="text-xs font-black text-indigo-500 uppercase tracking-widest">Delivery PIN</p>
+                                                                    <p className="text-[10px] font-medium text-slate-500 mt-0.5">Share this with the delivery partner</p>
+                                                                </div>
+                                                                <div className="px-4 py-2 bg-white dark:bg-slate-900 rounded-xl shadow-sm border border-slate-100 dark:border-slate-800">
+                                                                    <span className="text-2xl font-black text-indigo-600 tracking-[0.2em]">{order.delivery_otp}</span>
+                                                                </div>
+                                                            </div>
+                                                        )}
 
                                                         {/* LIVE TRACKING MAP */}
                                                         {['accepted', 'out_for_delivery'].includes(order.status) && (

@@ -136,11 +136,12 @@ const SuperAdminDashboard = () => {
                 {activeTab === 'overview' && (
                     <>
                         {/* KPI Grid */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-12">
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 md:gap-6 mb-12">
                             {[
                                 { label: 'Total Users', value: stats?.total_users, color: 'text-blue-500', icon: '👥' },
                                 { label: 'Active Vendors', value: stats?.total_vendors, color: 'text-rose-500', icon: '🏪' },
                                 { label: 'Total Orders', value: stats?.total_orders, color: 'text-orange-500', icon: '📦' },
+                                { label: 'Daily Orders', value: stats?.daily_orders, color: 'text-purple-500', icon: '🚀' },
                                 { label: 'Gross Volume', value: `Rs ${Number(stats?.total_revenue).toFixed(2)}`, color: 'text-slate-500', icon: '📊' },
                                 { label: 'Platform Profit', value: `Rs ${Number(stats?.admin_wallet).toFixed(2)}`, color: 'text-emerald-500 font-black scale-105', icon: '💎' },
                             ].map((kpi, i) => (
@@ -222,66 +223,119 @@ const SuperAdminDashboard = () => {
                 )}
 
                 {activeTab === 'users' && (
-                    <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 overflow-hidden">
-                        <div className="px-8 py-6 border-b border-slate-100 dark:border-slate-700">
-                            <h2 className="text-2xl font-black text-slate-900 dark:text-white">User Management</h2>
-                        </div>
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-left">
-                                <thead className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-xs font-bold uppercase tracking-widest">
-                                    <tr>
-                                        <th className="px-8 py-4">Name</th>
-                                        <th className="px-8 py-4">Email</th>
-                                        <th className="px-8 py-4">Role</th>
-                                        <th className="px-8 py-4">Joined</th>
-                                        <th className="px-8 py-4 text-right">Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                                    {users?.map((user) => (
-                                        <tr key={user.id} className="hover:bg-slate-50 dark:hover:bg-slate-900/30 transition-colors">
-                                            <td className="px-8 py-5 font-bold text-slate-900 dark:text-white">{user.name}</td>
-                                            <td className="px-8 py-5 text-slate-500 dark:text-slate-400 font-medium">{user.email}</td>
-                                            <td className="px-8 py-5">
-                                                <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter ${
-                                                    user.role === 'admin' ? 'bg-purple-100 text-purple-600' :
-                                                    user.role === 'vendor' ? 'bg-rose-100 text-rose-600' :
-                                                    user.role === 'delivery' ? 'bg-orange-100 text-orange-600' :
-                                                    'bg-blue-100 text-blue-600'
-                                                }`}>
-                                                    {user.role}
-                                                </span>
-                                            </td>
-                                            <td className="px-8 py-5 text-slate-400 text-sm">{new Date(user.created_at).toLocaleDateString()}</td>
-                                            <td className="px-8 py-5 text-right flex items-center justify-end space-x-3">
-                                                {user.id !== currentUser?.id ? (
-                                                    <>
-                                                        <button 
-                                                            onClick={() => toggleUserStatusMut.mutate({ userId: user.id, is_active: user.is_active === 0 ? 1 : 0 })}
-                                                            className={`px-3 py-1 text-xs font-bold uppercase rounded-lg border transition-all ${user.is_active !== 0 ? 'border-amber-500 text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/20' : 'border-emerald-500 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'}`}
-                                                        >
-                                                            {user.is_active !== 0 ? '🚫 Block' : '🔓 Unblock'}
-                                                        </button>
-                                                        <button 
-                                                            onClick={() => {
-                                                                if(window.confirm("Are you absolutely sure you want to erase this user?")) {
-                                                                    deleteUserMut.mutate(user.id);
-                                                                }
-                                                            }}
-                                                            className="px-3 py-1 text-xs font-bold uppercase rounded-lg border border-rose-500 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-all"
-                                                        >
-                                                            🗑️ Delete
-                                                        </button>
-                                                    </>
-                                                ) : (
-                                                    <span className="text-purple-500 font-black text-xs tracking-widest uppercase">You (Admin)</span>
-                                                )}
-                                            </td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                    <div className="space-y-8">
+                        {['customer', 'vendor', 'delivery', 'admin'].map(roleGroup => {
+                            const groupUsers = users?.filter(u => u.role === roleGroup) || [];
+                            if (groupUsers.length === 0) return null;
+
+                            const showEarnings = roleGroup === 'vendor' || roleGroup === 'delivery';
+                            const groupTotalEarned = showEarnings
+                                ? groupUsers.reduce((sum, u) => {
+                                    const earned = roleGroup === 'vendor'
+                                        ? Number(u.vendor_total_earned || 0)
+                                        : Number(u.delivery_total_earned || 0);
+                                    return sum + earned;
+                                }, 0)
+                                : 0;
+
+                            const roleIcon = { customer: '🛍️', vendor: '🍽️', delivery: '🛵', admin: '🛡️' }[roleGroup];
+                            const roleColor = { 
+                                customer: 'text-blue-500 bg-blue-50 dark:bg-blue-900/20',
+                                vendor: 'text-rose-500 bg-rose-50 dark:bg-rose-900/20',
+                                delivery: 'text-orange-500 bg-orange-50 dark:bg-orange-900/20',
+                                admin: 'text-purple-500 bg-purple-50 dark:bg-purple-900/20'
+                            }[roleGroup];
+
+                            return (
+                                <div key={roleGroup} className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 overflow-hidden">
+                                    <div className="px-8 py-6 border-b border-slate-100 dark:border-slate-700 flex items-center justify-between">
+                                        <div className="flex items-center gap-4">
+                                            <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-xl ${roleColor}`}>{roleIcon}</div>
+                                            <div>
+                                                <h2 className="text-xl font-black text-slate-900 dark:text-white capitalize">{roleGroup}s</h2>
+                                                <p className="text-xs text-slate-400 font-bold uppercase tracking-widest">{groupUsers.length} Registered Users</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            {showEarnings && (
+                                                <div className="text-right px-4 py-2 bg-emerald-50 dark:bg-emerald-900/20 rounded-2xl border border-emerald-100 dark:border-emerald-800">
+                                                    <p className="text-[9px] font-black text-emerald-500 uppercase tracking-widest">Total Group Earnings</p>
+                                                    <p className="text-lg font-black text-emerald-600 dark:text-emerald-400">Rs {groupTotalEarned.toFixed(2)}</p>
+                                                </div>
+                                            )}
+                                            <span className={`px-3 py-1 rounded-full text-xs font-bold ${roleColor}`}>{groupUsers.filter(u => u.is_active !== 0).length} Active</span>
+                                        </div>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left">
+                                            <thead className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 text-xs font-bold uppercase tracking-widest">
+                                                <tr>
+                                                    <th className="px-8 py-4">Name</th>
+                                                    <th className="px-8 py-4">Email</th>
+                                                    {showEarnings && <th className="px-8 py-4">Total Earnings</th>}
+                                                    <th className="px-8 py-4">Joined</th>
+                                                    <th className="px-8 py-4 text-right">Status</th>
+                                                </tr>
+                                            </thead>
+
+                                            <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
+                                                {groupUsers.map((user) => (
+                                                    <tr key={user.id} className="hover:bg-slate-50 dark:hover:bg-slate-900/30 transition-colors">
+                                                        <td className="px-8 py-5 font-bold text-slate-900 dark:text-white">{user.name}</td>
+                                                        <td className="px-8 py-5 text-slate-500 dark:text-slate-400 font-medium">{user.email}</td>
+                                                        {showEarnings && (() => {
+                                                            const earned = roleGroup === 'vendor'
+                                                                ? Number(user.vendor_total_earned || 0)
+                                                                : Number(user.delivery_total_earned || 0);
+                                                            const orderCount = roleGroup === 'vendor'
+                                                                ? Number(user.vendor_orders_count || 0)
+                                                                : Number(user.delivery_orders_count || 0);
+                                                            return (
+                                                                <td className="px-8 py-5">
+                                                                    <div className="flex flex-col">
+                                                                        <span className={`font-black text-sm ${earned > 0 ? 'text-emerald-500' : 'text-slate-400'}`}>
+                                                                            Rs {earned.toFixed(2)}
+                                                                        </span>
+                                                                        <span className="text-[10px] text-slate-400 font-medium mt-0.5">
+                                                                            {orderCount} delivered order{orderCount !== 1 ? 's' : ''}
+                                                                        </span>
+                                                                    </div>
+                                                                </td>
+                                                            );
+                                                        })()}
+                                                        <td className="px-8 py-5 text-slate-400 text-sm">{new Date(user.created_at).toLocaleDateString()}</td>
+                                                        <td className="px-8 py-5 text-right flex items-center justify-end space-x-3">
+                                                            {user.id !== currentUser?.id ? (
+                                                                <>
+                                                                    <button 
+                                                                        onClick={() => toggleUserStatusMut.mutate({ userId: user.id, is_active: user.is_active === 0 ? 1 : 0 })}
+                                                                        className={`px-3 py-1 text-xs font-bold uppercase rounded-lg border transition-all ${user.is_active !== 0 ? 'border-amber-500 text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-900/20' : 'border-emerald-500 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'}`}
+                                                                    >
+                                                                        {user.is_active !== 0 ? '🚫 Block' : '🔓 Unblock'}
+                                                                    </button>
+                                                                    <button 
+                                                                        onClick={() => {
+                                                                            if(window.confirm("Are you absolutely sure you want to erase this user?")) {
+                                                                                deleteUserMut.mutate(user.id);
+                                                                            }
+                                                                        }}
+                                                                        className="px-3 py-1 text-xs font-bold uppercase rounded-lg border border-rose-500 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-all"
+                                                                    >
+                                                                        🗑️ Delete
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <span className="text-purple-500 font-black text-xs tracking-widest uppercase">You (Admin)</span>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            );
+                        })}
                     </div>
                 )}
             </main>

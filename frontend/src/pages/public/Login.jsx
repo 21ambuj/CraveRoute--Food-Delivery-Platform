@@ -1,6 +1,6 @@
 import React, { useState, useContext } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import axios from 'axios';
+import api from '../../utils/api';
 import { AuthContext } from '../../context/AuthContext';
 import Navbar from '../../components/Navbar';
 import toast from 'react-hot-toast';
@@ -18,7 +18,7 @@ const Login = () => {
         setLoading(true);
 
         try {
-            const response = await axios.post('http://localhost:5000/api/auth/login', {
+            const response = await api.post('/auth/login', {
                 email,
                 password
             });

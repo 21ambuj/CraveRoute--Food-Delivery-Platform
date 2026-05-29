@@ -50,11 +50,28 @@ const VendorDashboard = () => {
         enabled: !!vprofile
     });
 
+    // 5. Fetch user wallet (actual earnings from DB splits)
+    const { data: authProfile } = useQuery({
+        queryKey: ['authProfile'],
+        queryFn: async () => {
+            const { data } = await api.get('/auth/profile');
+            return data;
+        },
+        refetchInterval: 10000 // Refresh every 10s to stay in sync
+    });
+
     // --- Real-time Socket Connection (MOVED AFTER INITIALIZATION) ---
     useEffect(() => {
         if (!vprofile?.user_id) return;
 
+        let socketInstance = null;
+
         import('../../utils/socket').then(({ default: socket }) => {
+            socketInstance = socket;
+            const token = localStorage.getItem('craveroute_token');
+            if (token) {
+                socket.auth = { token };
+            }
             socket.connect();
             socket.emit('join', vprofile.user_id);
 
@@ -62,15 +79,17 @@ const VendorDashboard = () => {
                 toast.success(`New order notification: ${data.orderId}`, { icon: '🍽️', duration: 8000 });
                 queryClient.invalidateQueries(['vendorOrders']);
             });
-
-            return () => {
-                socket.off('vendor_order_update');
-                socket.disconnect();
-            };
         });
-    }, [vprofile?.user_id]);
 
-    const [profileForm, setProfileForm] = useState({ name: '', address: '', description: '', image_url: '', latitude: null, longitude: null });
+        return () => {
+            if (socketInstance) {
+                socketInstance.off('vendor_order_update');
+                socketInstance.disconnect();
+            }
+        };
+    }, [vprofile?.user_id, queryClient]);
+
+    const [profileForm, setProfileForm] = useState({ name: '', address: '', description: '', image_url: '', latitude: null, longitude: null, cost_for_two: 300 });
     const [uploading, setUploading] = useState(false);
 
     const handleImageUpload = async (e) => {
@@ -110,7 +129,8 @@ const VendorDashboard = () => {
                 description: vprofile.description || '',
                 image_url: vprofile.image_url || '',
                 latitude: vprofile.latitude || null,
-                longitude: vprofile.longitude || null
+                longitude: vprofile.longitude || null,
+                cost_for_two: vprofile.cost_for_two || 300
             });
         }
     }, [vprofile]);
@@ -193,7 +213,8 @@ const VendorDashboard = () => {
 
     const liveOrders = orders?.filter(o => !['delivered', 'cancelled'].includes(o.status));
     const historyOrders = orders?.filter(o => ['delivered', 'cancelled'].includes(o.status));
-    const totalEarnings = historyOrders?.filter(o => o.status === 'delivered').reduce((sum, o) => sum + Math.max(0, Number(o.total_amount) - 23), 0) || 0;
+    // Use actual wallet balance from DB (credited during order completion splits)
+    const totalEarnings = Number(authProfile?.wallet || 0);
 
     return (
         <div className="min-h-screen bg-slate-50 dark:bg-slate-900 transition-colors duration-300">
@@ -241,6 +262,7 @@ const VendorDashboard = () => {
                             <div><label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Restaurant Name</label><input required type="text" className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white" value={profileForm.name} onChange={e => setProfileForm({...profileForm, name: e.target.value})} /></div>
                             <div><label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Full Address</label><input required type="text" className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white" value={profileForm.address} onChange={e => setProfileForm({...profileForm, address: e.target.value})} /></div>
                             <div><label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Shop Description</label><textarea required rows="3" className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white resize-none" placeholder="E.g. The best authentic Italian pizza in town..." value={profileForm.description} onChange={e => setProfileForm({...profileForm, description: e.target.value})}></textarea></div>
+                            <div><label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Cost for Two (Rs)</label><input required type="number" min="0" className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white" placeholder="300" value={profileForm.cost_for_two} onChange={e => setProfileForm({...profileForm, cost_for_two: e.target.value})} /></div>
                             
                             {/* --- IMAGE UPLOAD --- */}
                             <div>
@@ -290,8 +312,9 @@ const VendorDashboard = () => {
                                 <div><h1 className="text-4xl md:text-5xl font-black mb-2">{vprofile.name}</h1><p className="text-slate-300 font-medium">📍 {vprofile.address}</p></div>
                                 <div className="mt-6 md:mt-0 flex flex-col items-end gap-3">
                                     <div className="px-5 py-3 bg-white/10 backdrop-blur-md rounded-2xl border border-white/10 flex flex-col items-end">
-                                        <span className="text-[10px] font-black text-rose-300 uppercase tracking-widest">Total Earnings</span>
+                                        <span className="text-[10px] font-black text-rose-300 uppercase tracking-widest">Wallet Balance</span>
                                         <span className="text-3xl font-black text-white mt-0.5">Rs {totalEarnings.toFixed(2)}</span>
+                                        <span className="text-[9px] text-slate-400 mt-0.5">Total Lifetime Earnings</span>
                                     </div>
                                     <div className="inline-flex items-center px-4 py-2 bg-green-500/20 border border-green-500/30 rounded-full text-green-400 text-xs font-bold"><span className="w-2 h-2 rounded-full bg-green-400 mr-2 animate-pulse"></span> Receiving Orders</div>
                                 </div>
@@ -486,6 +509,10 @@ const VendorDashboard = () => {
                                     <div>
                                         <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Shop Description</label>
                                         <textarea required rows="3" className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white resize-none" value={profileForm.description} onChange={e => setProfileForm({...profileForm, description: e.target.value})}></textarea>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-slate-700 dark:text-slate-300 mb-2">Cost for Two (Rs)</label>
+                                        <input required type="number" min="0" className="w-full px-5 py-3.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white" value={profileForm.cost_for_two} onChange={e => setProfileForm({...profileForm, cost_for_two: e.target.value})} />
                                     </div>
                                     
                                     {/* --- IMAGE UPLOAD --- */}
