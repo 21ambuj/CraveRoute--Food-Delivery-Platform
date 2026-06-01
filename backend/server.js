@@ -16,10 +16,11 @@ app.use(helmet({
 // 2. CORS — Restrict to known frontend origins only
 app.use(cors({
     origin: function (origin, callback) {
+        const frontendUrl = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.replace(/\/$/, "") : null;
         const allowedOrigins = [
             'http://localhost:5173', 
             'http://127.0.0.1:5173', 
-            process.env.FRONTEND_URL
+            frontendUrl
         ].filter(Boolean);
 
         if (!origin || allowedOrigins.includes(origin)) {
